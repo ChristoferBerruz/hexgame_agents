@@ -1,0 +1,3 @@
+[submodule "ourhexgame"]
+	path = ourhexgame
+	url = https://github.com/sjsu-interconnect/ourhexgame
