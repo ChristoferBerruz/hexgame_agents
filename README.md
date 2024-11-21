@@ -21,3 +21,11 @@ manually install the following dependencies:
 pip install "pettingzoo[classic]"
 pip install torch
 ```
+
+## Hexgame as a submodule
+This project uses submodules to pull updates from the shared
+ourhexgame repo. To update the submodules, simply do
+
+```
+git pull --recurse-submodules
+```
