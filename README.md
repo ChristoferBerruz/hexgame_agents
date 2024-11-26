@@ -20,6 +20,9 @@ manually install the following dependencies:
 ```code
 pip install "pettingzoo[classic]"
 pip install torch
+pip install torchvision
+pip install click
+pip install "ray[tune]"
 ```
 
 ## Hexgame as a submodule
