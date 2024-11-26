@@ -9,6 +9,8 @@ readme = "README.md"
 python = "^3.10"
 pettingzoo = {extras = ["classic"], version = "^1.24.3"}
 torch = "^2.5.1"
+click = "^8.1.7"
+torchvision = "^0.20.1"
 
 
 [build-system]
