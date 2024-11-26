@@ -1,25 +1,9 @@
-from abc import ABC, abstractmethod
 from typing import Any
 
-from attrs import define, field
+from attrs import define
 from ourhexgame.ourhexenv import OurHexGame
 
-
-@define
-class Agent(ABC):
-    env: OurHexGame = field()
-
-    def from_file(self, file) -> "Agent":
-        pass
-
-
-    def to_file(self, file: str) -> None:
-        pass
-
-
-    @abstractmethod
-    def select_action(observation, reward, termination, truncation, info) -> int:
-        pass
+from hexgame_agents.protocols import Agent
 
 
 @define
