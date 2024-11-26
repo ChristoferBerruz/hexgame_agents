@@ -48,6 +48,29 @@ def board_adapter(func):
     return wrapper
 
 
+class CategoricalMasked(torch.distributions.Categorical):
+
+    def __init__(self, probs: torch.Tensor, mask: torch.Tensor):
+        self.batch, self.nb_action = probs.size()
+        self.tensor_mask = torch.stack([mask.bool()]*self.batch, dim=0)
+        self.all_zeros = torch.zeros_like(probs)
+        probs = torch.where(self.tensor_mask, probs, self.all_zeros)
+        super(CategoricalMasked, self).__init__(probs=probs)
+
+    def entropy(self):
+        # Elementwise multiplication
+        p_log_p = torch.mul(self.logits, self.probs)
+        # Compute the entropy with possible action only
+        p_log_p = torch.where(
+            self.tensor_mask,
+            p_log_p,
+            self.all_zeros
+        )
+        # entropy is simply the sum of the negative log probabilities
+        # along the last dimension
+        return -p_log_p.sum(dim=-1)
+
+
 class BaseNN(torch.nn.Module):
     """Base class for neural networks.
     """
@@ -147,9 +170,9 @@ class ActorCriticNN(BaseNN):
         )
 
     @board_adapter
-    def act(self, state: np.ndarray):
+    def act(self, state: np.ndarray, mask: torch.Tensor):
         probs = self.actor(state)
-        distribution = torch.distributions.Categorical(probs)
+        distribution = CategoricalMasked(probs, mask)
         action = distribution.sample()
         action_log_prob = distribution.log_prob(action)
         state_val = self.critic(state)
@@ -217,10 +240,11 @@ class TrainablePPOAgent(PPOAgent):
         self.to(self.device)
 
     @board_adapter
-    def select_action(self, state):
+    def select_action(self, state, mask: np.ndarray):
         with self.old_nn.eval_mode():
             state = state.to(self.device)
-            action, action_logprob, state_val = self.old_nn.act(state)
+            mask_t = torch.from_numpy(mask).to(dtype=torch.float32).to(self.device)
+            action, action_logprob, state_val = self.old_nn.act(state, mask_t)
         record = PPOActionRecord(state, action, action_logprob, state_val, 0.0)
         self.buffer.append(record)
         return action.item()
@@ -240,7 +264,6 @@ class TrainablePPOAgent(PPOAgent):
         return torch.tensor(rewards, dtype=torch.float32)
     
     def optimize_policy(self, epochs: int):
-        print(f"Optimizing policy for {epochs}")
         _states = torch.stack([record.state for record in self.buffer])
         _actions = torch.stack([record.action for record in self.buffer])
         _old_logprobs = torch.stack([record.action_log_prob for record in self.buffer])
@@ -262,7 +285,6 @@ class TrainablePPOAgent(PPOAgent):
         self.old_nn.load_state_dict(self.nn.state_dict())
 
         self.buffer.clear()
-        print("Policy optimization done.")
 
     def _epoch_iter(
             self,
@@ -304,8 +326,8 @@ class TrainablePPOAgent(PPOAgent):
     def load(self, model_path: str):
         self.nn.load(model_path)
     
-    def act(self, state: np.ndarray):
-        return self.nn.act(state)
+    def act(self, state: np.ndarray, mask: torch.Tensor):
+        return self.nn.act(state, mask=mask)
     
     def evaluate(self, state: np.ndarray, action: torch.Tensor):
         return self.nn.evaluate(state, action)
