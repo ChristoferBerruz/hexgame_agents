@@ -13,6 +13,8 @@ from attrs import define, field
 from functools import wraps
 
 from torchvision.transforms import Normalize
+from hexgame_agents.protocols import Agent
+
 
 normalize_tf = Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5))
 
@@ -200,7 +202,7 @@ class PPOActionRecord:
     
 
 @define
-class PPOAgent:
+class PPOAgent(Agent):
     # Adopt composition over inheritance
     env: OurHexGame
     nn: ActorCriticNN
@@ -211,9 +213,19 @@ class PPOAgent:
         self.nn.to(device)
         return self
     
-    def select_action(self, state):
-        with self.nn.eval_mode():
-            action, _, _ = self.nn.act(state)
+    @board_adapter
+    def _select_action(self, state, mask: np.ndarray):
+        with self.old_nn.eval_mode():
+            state = state.to(self.device)
+            mask_t = torch.from_numpy(mask).to(
+                dtype=torch.float32).to(self.device)
+            action, action_logprob, state_val = self.nn.act(state, mask_t)
+        return action, action_logprob, state_val, state
+    
+    def select_action(self, observation, reward, termination, truncation, info) -> int:
+        board = observation["observation"]
+        mask = info["action_mask"]
+        action, *_ = self._select_action(board, mask)
         return action.item()
     
 
@@ -239,12 +251,10 @@ class TrainablePPOAgent(PPOAgent):
         self.old_nn.load_state_dict(self.nn.state_dict())
         self.to(self.device)
 
-    @board_adapter
-    def select_action(self, state, mask: np.ndarray):
-        with self.old_nn.eval_mode():
-            state = state.to(self.device)
-            mask_t = torch.from_numpy(mask).to(dtype=torch.float32).to(self.device)
-            action, action_logprob, state_val = self.old_nn.act(state, mask_t)
+    def select_action(self, observation, reward, termination, truncation, info) -> int:
+        board = observation["observation"]
+        mask = info["action_mask"]
+        action, action_logprob, state_val, state = self._select_action(board, mask)
         record = PPOActionRecord(state, action, action_logprob, state_val, 0.0)
         self.buffer.append(record)
         return action.item()

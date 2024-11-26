@@ -28,9 +28,6 @@ def dense_train():
         cumulative_reward = 0
         for agent_name in env.agent_iter():
             observation, reward, termination, truncation, info = env.last()
-            board = observation["observation"]
-            mask = info["action_mask"]
-            action_mask = info["action_mask"]
             if turns_per_agents[agent_name] > 0 and agent_name == "player_2":
                 agent.buffer[-1].reward = reward
                 agent.buffer[-1].done = termination or truncation
@@ -39,11 +36,18 @@ def dense_train():
             if termination or truncation:
                 action = None
             elif agent_name == "player_1":
+                action_mask = info["action_mask"]
                 action = env.action_space(agent_name).sample(action_mask)
             else:
                 if (current_iter + 1) % every_how_many == 0:
                     agent.optimize_policy(epochs=80)
-                action = agent.select_action(board, mask)
+                action = agent.select_action(
+                    observation,
+                    reward,
+                    termination,
+                    truncation,
+                    info
+                )
                 current_iter += 1
 
             env.step(action)
