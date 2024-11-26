@@ -274,6 +274,8 @@ class TrainablePPOAgent(PPOAgent):
         return torch.tensor(rewards, dtype=torch.float32)
     
     def optimize_policy(self, epochs: int):
+        if not self.buffer:
+            return
         _states = torch.stack([record.state for record in self.buffer])
         _actions = torch.stack([record.action for record in self.buffer])
         _old_logprobs = torch.stack([record.action_log_prob for record in self.buffer])
