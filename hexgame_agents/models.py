@@ -14,6 +14,7 @@ from functools import wraps
 
 from torchvision.transforms import Normalize
 from hexgame_agents.protocols import Agent
+import pickle
 
 
 normalize_tf = Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5))
@@ -203,7 +204,6 @@ class PPOActionRecord:
 
 @define
 class PPOAgent(Agent):
-    # Adopt composition over inheritance
     env: OurHexGame
     nn: ActorCriticNN
     device: str = "cpu"
@@ -214,19 +214,31 @@ class PPOAgent(Agent):
         return self
     
     @board_adapter
-    def _select_action(self, state, mask: np.ndarray):
-        with self.old_nn.eval_mode():
+    def _select_action(self, state, mask: np.ndarray, nn: ActorCriticNN):
+        with nn.eval_mode():
             state = state.to(self.device)
             mask_t = torch.from_numpy(mask).to(
                 dtype=torch.float32).to(self.device)
-            action, action_logprob, state_val = self.nn.act(state, mask_t)
+            action, action_logprob, state_val = nn.act(state, mask_t)
         return action, action_logprob, state_val, state
     
     def select_action(self, observation, reward, termination, truncation, info) -> int:
         board = observation["observation"]
         mask = info["action_mask"]
-        action, *_ = self._select_action(board, mask)
+        action, *_ = self._select_action(board, mask, nn=self.nn)
         return action.item()
+    
+    @classmethod
+    def from_file(cls, model_path: str, env: OurHexGame):
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        actor_critic = ActorCriticNN()
+        with open(model_path, "rb") as fp:
+            checkpoint_dict = pickle.load(fp)
+        state_dict = checkpoint_dict["nn_state_dict"]
+        actor_critic.load_state_dict(state_dict)
+        _instance = cls(env, actor_critic, device=device)
+        _instance.to(device)
+        return _instance
     
 
 @define(slots=False)
@@ -254,7 +266,7 @@ class TrainablePPOAgent(PPOAgent):
     def select_action(self, observation, reward, termination, truncation, info) -> int:
         board = observation["observation"]
         mask = info["action_mask"]
-        action, action_logprob, state_val, state = self._select_action(board, mask)
+        action, action_logprob, state_val, state = self._select_action(board, mask, nn=self.old_nn)
         record = PPOActionRecord(state, action, action_logprob, state_val, 0.0)
         self.buffer.append(record)
         return action.item()

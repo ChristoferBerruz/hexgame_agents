@@ -1,9 +1,10 @@
 import click
-from hexgame_agents.models import TrainablePPOAgent, ActorCriticNN
+from hexgame_agents.models import TrainablePPOAgent, ActorCriticNN, PPOAgent
 
 from ourhexgame.ourhexenv import OurHexGame
 import torch
 
+import time
 import ray
 from ray import tune
 from ray import train
@@ -147,6 +148,38 @@ def train_agent(sparse: bool, gpu: bool):
 def re_train():
     pass
 
+
+@cli.command()
+@click.option(
+    "--checkpoint-file",
+    type=click.Path(exists=True, dir_okay=False, file_okay=True),
+    required=True
+)
+@click.option("--sparse/--no-sparse", is_flag=True, default=False)
+def test_agent(
+    checkpoint_file: str,
+    sparse: bool,
+):
+    env = OurHexGame(sparse_flag=sparse, render_mode="human")
+    agent: PPOAgent = PPOAgent.from_file(checkpoint_file, env=env)
+    env.reset()
+    for agent_name in env.agent_iter():
+        observation, reward, termination, truncation, info = env.last()
+        if termination or truncation:
+            action = None
+        elif agent_name == "player_1":
+            action_mask = info["action_mask"]
+            action = env.action_space(agent_name).sample(action_mask)
+        else:
+            action = agent.select_action(
+                observation,
+                reward,
+                termination,
+                truncation,
+                info
+            )
+        env.step(action)
+        time.sleep(0.5)
 
 def main():
     cli()
