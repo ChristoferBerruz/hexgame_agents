@@ -4,6 +4,8 @@ from hexgame_agents.models import TrainablePPOAgent, ActorCriticNN, PPOAgent
 from ourhexgame.ourhexenv import OurHexGame
 import torch
 
+import random
+
 import time
 import ray
 from ray import tune
@@ -14,55 +16,92 @@ import ray.cloudpickle as pickle
 from pathlib import Path
 import tempfile
 
+from typing import Tuple
+
 
 @click.group()
 def cli():
     pass
 
-def train_general(sparse_flag: bool, config):
-    env = OurHexGame(sparse_flag=sparse_flag, render_mode=None)
-    nn = ActorCriticNN()
-    lr_actor = config["lr_actor"]
-    lr_critic = config["lr_critic"]
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    agent = TrainablePPOAgent(env, nn, device=device, lr_actor=lr_actor, lr_critic=lr_critic)
 
-    checkpoint = get_checkpoint()
-    if checkpoint:
-        with checkpoint.as_directory() as checkpoint_dir:
-            data_path = Path(checkpoint_dir) / "data.pkl"
-            with open(data_path, "rb") as fp:
-                checkpoint_state = pickle.load(fp)
-            time_step = checkpoint_state["time_step"]
-            agent.nn.load_state_dict(checkpoint_state["nn_state_dict"])
-            agent.old_nn.load_state_dict(checkpoint_state["old_nn_state_dict"])
-            agent.optimizer.load_state_dict(checkpoint_state["optimizer_state_dict"])
-    else:
-        time_step = 0
-    max_time_steps = 100_000_000
-    running_reward = 0
-    optimize_every_steps = 64
-    checkpoint_every_steps = 500
-    episodes_played = 0
-    while time_step < max_time_steps:
-        time_step += 1
+class SelfPlayTrainable(ray.tune.Trainable):
+
+    def setup(self, config: dict):
+        self.lr_actor = config["lr_actor"]
+        self.lr_critic = config["lr_critic"]
+        self.swap_rate = config["swap_rate"]
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        env = OurHexGame(sparse_flag=self.config["sparse_flag"], render_mode=None)
+        self.optimize_policy_epochs = config["optimize_policy_epochs"]
+        self.target_agent = TrainablePPOAgent(
+            env,
+            ActorCriticNN(),
+            device=self.device,
+            lr_actor=self.lr_actor,
+            lr_critic=self.lr_critic
+        )
+        self.oponent_agent = TrainablePPOAgent(
+            env,
+            ActorCriticNN(),
+            device=self.device,
+            lr_actor=self.lr_actor,
+            lr_critic=self.lr_critic
+        )
+
+    def step(self):
+        # Every trainable step is a full episode
+        running_reward = 0
+        for _ in range(self.config["games_per_step"]):
+            # The swap rate is the probability of swapping the agents
+            if random.random() < self.swap_rate:
+                player_1_agent = self.target_agent
+                player_2_agent = self.oponent_agent
+            else:
+                player_1_agent = self.oponent_agent
+                player_2_agent = self.target_agent
+            player_1_cumulative_reward, player_2_cumulative_reward, winner = self.play_episode(
+                player_1_agent, player_2_agent)
+            player_1_agent.optimize_policy(self.optimize_policy_epochs)
+            player_2_agent.optimize_policy(self.optimize_policy_epochs)
+            running_reward += player_1_cumulative_reward + player_2_cumulative_reward
+            running_reward /= 2
+        return {"average_reward": running_reward/self.config["games_per_step"]}
+            
+
+    def play_episode(
+            self,
+            player_1_agent: TrainablePPOAgent,
+            player_2_agent: TrainablePPOAgent
+        ) -> Tuple[int, int, str]:
+        """Play an episode of the game.
+
+        Args:
+            player_1_agent (Agent): player 1
+            player_2_agent (Agent): player 2
+
+        Returns:
+            Tuple[int, int, str]: (player1_cumulative_reward, player2_cumulative_reward, winner)
+        """
+        env = self.target_agent.env
         env.reset()
-        episode_cumulative_reward = 0
+        episode_cumulative_reward_per_agent = {
+            "player_1": 0,
+            "player_2": 0
+        }
+        agent_names_to_agents = {
+            "player_1": player_1_agent,
+            "player_2": player_2_agent
+        }
         for agent_name in env.agent_iter():
             observation, reward, termination, truncation, info = env.last()
-            if agent_name == "player_2" and agent.buffer:
+            episode_cumulative_reward_per_agent[agent_name] += reward
+            agent = agent_names_to_agents[agent_name]
+            if agent.buffer:
                 agent.buffer[-1].reward = reward
                 agent.buffer[-1].done = termination or truncation
-                episode_cumulative_reward += reward
-            
             if termination or truncation:
                 action = None
-            elif agent_name == "player_1":
-                action_mask = info["action_mask"]
-                action = env.action_space(agent_name).sample(action_mask)
             else:
-                if time_step % optimize_every_steps == 0:
-                    agent.optimize_policy(epochs=80)
                 action = agent.select_action(
                     observation,
                     reward,
@@ -70,35 +109,45 @@ def train_general(sparse_flag: bool, config):
                     truncation,
                     info
                 )
-
             env.step(action)
-        episodes_played += 1
-        running_reward += episode_cumulative_reward
-        average_reward = running_reward / episodes_played
-        if time_step % checkpoint_every_steps == 0:
-            checkpoint_data = {
-                "time_step": time_step,
-                "nn_state_dict": agent.nn.state_dict(),
-                "old_nn_state_dict": agent.old_nn.state_dict(),
-                "optimizer_state_dict": agent.optimizer.state_dict()
-            }
-            with tempfile.TemporaryDirectory() as checkpoint_dir:
+
+        return (episode_cumulative_reward_per_agent["player_1"],
+                episode_cumulative_reward_per_agent["player_2"],
+                env.winner)
+    
+    def save_checkpoint(self):
+        checkpoint_data = {
+            "nn_state_dict": self.target_agent.nn.state_dict(),
+            "old_nn_state_dict": self.target_agent.old_nn.state_dict(),
+            "optimizer_state_dict": self.target_agent.optimizer.state_dict(),
+            "oponent_nn_state_dict": self.oponent_agent.nn.state_dict(),
+            "oponent_old_nn_state_dict": self.oponent_agent.old_nn.state_dict(),
+            "oponent_optimizer_state_dict": self.oponent_agent.optimizer.state_dict()
+        }
+        with tempfile.TemporaryDirectory() as checkpoint_dir:
+            data_path = Path(checkpoint_dir) / "data.pkl"
+            with open(data_path, "wb") as fp:
+                pickle.dump(checkpoint_data, fp)
+
+            return Checkpoint.from_directory(checkpoint_dir)
+
+    def load_checkpoint(self):
+        checkpoint = get_checkpoint()
+        if checkpoint:
+            with checkpoint.as_directory() as checkpoint_dir:
                 data_path = Path(checkpoint_dir) / "data.pkl"
-                with open(data_path, "wb") as fp:
-                    pickle.dump(checkpoint_data, fp)
-
-                checkpoint = Checkpoint.from_directory(checkpoint_dir)
-                train.report(
-                    {"average_reward": average_reward},
-                    checkpoint=checkpoint,
-                )
-    env.close()
-
-def train_dense(config):
-    train_general(sparse_flag=False, config=config)
-
-def train_sparse(config):
-    train_general(sparse_flag=True, config=config)
+                with open(data_path, "rb") as fp:
+                    checkpoint_state = pickle.load(fp)
+                self.target_agent.nn.load_state_dict(checkpoint_state["nn_state_dict"])
+                self.target_agent.old_nn.load_state_dict(
+                    checkpoint_state["old_nn_state_dict"])
+                self.target_agent.optimizer.load_state_dict(
+                    checkpoint_state["optimizer_state_dict"])
+                self.oponent_agent.nn.load_state_dict(checkpoint_state["oponent_nn_state_dict"])
+                self.oponent_agent.old_nn.load_state_dict(
+                    checkpoint_state["oponent_old_nn_state_dict"])
+                self.oponent_agent.optimizer.load_state_dict(
+                    checkpoint_state["oponent_optimizer_state_dict"])
 
 
 @cli.command()
@@ -115,24 +164,24 @@ def train_agent(sparse: bool, gpu: bool):
     config = {
         "lr_critic": tune.loguniform(1e-4, 1e-1),
         "lr_actor": tune.loguniform(1e-4, 1e-1),
+        "swap_rate": tune.uniform(0.1, 0.9),
+        "games_per_step": 10,
+        "optimize_policy_epochs": 80,
+        "sparse_flag": sparse,
     }
     scheduler = ASHAScheduler(
         metric="average_reward",
         mode="max",
-        grace_period=1,
+        grace_period=2,
         reduction_factor=2
     )
-    if sparse:
-        train_func = train_sparse
-    else:
-        train_func = train_dense
     # TODO: Figure out a way to better schedule the cpus
     # to avoid running out of memory.
     result = tune.run(
-        train_func,
+        SelfPlayTrainable,
         config=config,
         num_samples=num_samples,
-        resources_per_trial={"cpu": 8},
+        resources_per_trial={"cpu": 2},
         scheduler=scheduler,
     )
 
@@ -177,6 +226,7 @@ def test_agent(
             )
         env.step(action)
         time.sleep(0.5)
+    print("Winner: ", env.winner)
 
 def main():
     cli()
