@@ -26,9 +26,6 @@ def train_general(sparse_flag: bool, config):
     lr_critic = config["lr_critic"]
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     agent = TrainablePPOAgent(env, nn, device=device, lr_actor=lr_actor, lr_critic=lr_critic)
-    total_games = 1_000
-    every_how_many = 100
-    current_iter = 0
 
     checkpoint = get_checkpoint()
     if checkpoint:
@@ -36,27 +33,27 @@ def train_general(sparse_flag: bool, config):
             data_path = Path(checkpoint_dir) / "data.pkl"
             with open(data_path, "rb") as fp:
                 checkpoint_state = pickle.load(fp)
-            start_game = checkpoint_state["game"]
+            time_step = checkpoint_state["time_step"]
             agent.nn.load_state_dict(checkpoint_state["nn_state_dict"])
             agent.old_nn.load_state_dict(checkpoint_state["old_nn_state_dict"])
             agent.optimizer.load_state_dict(checkpoint_state["optimizer_state_dict"])
     else:
-        start_game = 0
-
-    for game in range(start_game, total_games):
+        time_step = 0
+    max_time_steps = 100_000_000
+    running_reward = 0
+    optimize_every_steps = 64
+    checkpoint_every_steps = 500
+    episodes_played = 0
+    while time_step < max_time_steps:
+        time_step += 1
         env.reset()
-        turns_per_agents = {
-            "player_1": 0,
-            "player_2": 0
-        }
-        cumulative_reward = 0
-        n_steps = 0
+        episode_cumulative_reward = 0
         for agent_name in env.agent_iter():
             observation, reward, termination, truncation, info = env.last()
             if agent_name == "player_2" and agent.buffer:
                 agent.buffer[-1].reward = reward
                 agent.buffer[-1].done = termination or truncation
-                cumulative_reward += reward
+                episode_cumulative_reward += reward
             
             if termination or truncation:
                 action = None
@@ -64,7 +61,7 @@ def train_general(sparse_flag: bool, config):
                 action_mask = info["action_mask"]
                 action = env.action_space(agent_name).sample(action_mask)
             else:
-                if (current_iter + 1) % every_how_many == 0:
+                if time_step % optimize_every_steps == 0:
                     agent.optimize_policy(epochs=80)
                 action = agent.select_action(
                     observation,
@@ -73,14 +70,14 @@ def train_general(sparse_flag: bool, config):
                     truncation,
                     info
                 )
-                current_iter += 1
-                n_steps += 1
 
             env.step(action)
-            turns_per_agents[agent_name] += 1
-        if game % 50 == 0:
+        episodes_played += 1
+        running_reward += episode_cumulative_reward
+        average_reward = running_reward / episodes_played
+        if time_step % checkpoint_every_steps == 0:
             checkpoint_data = {
-                "game": game,
+                "time_step": time_step,
                 "nn_state_dict": agent.nn.state_dict(),
                 "old_nn_state_dict": agent.old_nn.state_dict(),
                 "optimizer_state_dict": agent.optimizer.state_dict()
@@ -92,7 +89,7 @@ def train_general(sparse_flag: bool, config):
 
                 checkpoint = Checkpoint.from_directory(checkpoint_dir)
                 train.report(
-                    {"average_reward": cumulative_reward / n_steps},
+                    {"average_reward": average_reward},
                     checkpoint=checkpoint,
                 )
     env.close()
@@ -114,7 +111,6 @@ def train_agent(sparse: bool, gpu: bool):
         # A quick and dirty fix is to directly inform RAY that the current device is a CPU.
         ray.init(num_gpus=0)
         print("--no-gpu flag detected. Forcing Ray to run on CPU.")
-    max_num_epochs = 10
     num_samples = 10
     config = {
         "lr_critic": tune.loguniform(1e-4, 1e-1),
@@ -123,23 +119,24 @@ def train_agent(sparse: bool, gpu: bool):
     scheduler = ASHAScheduler(
         metric="average_reward",
         mode="max",
-        max_t=max_num_epochs,
         grace_period=1,
-        reduction_factor=2,
+        reduction_factor=2
     )
     if sparse:
         train_func = train_sparse
     else:
         train_func = train_dense
+    # TODO: Figure out a way to better schedule the cpus
+    # to avoid running out of memory.
     result = tune.run(
         train_func,
-        resources_per_trial={"cpu": 2},
         config=config,
         num_samples=num_samples,
+        resources_per_trial={"cpu": 8},
         scheduler=scheduler,
     )
 
-    best_trial = result.get_best_trial("average_reward", "max", "last")
+    best_trial = result.get_best_trial("average_reward", "max", "avg")
     print(f"Best trial config: {best_trial.config}")
     print(
         f"Best trial average reward: {best_trial.last_result['average_reward']}")
