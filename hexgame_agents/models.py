@@ -124,23 +124,23 @@ class CNNApproximator(BaseNN):
     def __init__(self,
             in_channels: int = 3,
             board_shape: Tuple[int, int] = gu.BOARD_SHAPE,
-            first_fc_units: int = 128,
+            first_fc_units: int = 256,
         ):
         super(CNNApproximator, self).__init__()
         self.board_shape = board_shape
         self.height, self.width = board_shape
         self.first_cnn_block = torch.nn.Sequential(
-            torch.nn.Conv2d(in_channels, 16, kernel_size=3, stride=1, padding=1),
-            torch.nn.Sigmoid(),
+            torch.nn.Conv2d(in_channels, 64, kernel_size=3, stride=1, padding=1),
+            torch.nn.Tanh(),
             torch.nn.AvgPool2d(kernel_size=2, stride=2),
         )
         self.second_cnn_block = torch.nn.Sequential(
-            torch.nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1),
-            torch.nn.Sigmoid(),
+            torch.nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1),
+            torch.nn.Tanh(),
             torch.nn.AvgPool2d(kernel_size=2, stride=2),
         )
         self.fc = torch.nn.Sequential(
-            torch.nn.Linear(128, first_fc_units),
+            torch.nn.Linear(4*128, first_fc_units),
             torch.nn.ReLU(),
         )
         self.output_dim = first_fc_units
@@ -253,7 +253,7 @@ class TrainablePPOAgent(PPOAgent):
     max_grad_norm: float = 0.5
     gamma: float = 0.99
     optimizer: torch.optim.Optimizer = field(init=False)
-    loss: torch.nn.Module = torch.nn.MSELoss()
+    mse: torch.nn.Module = torch.nn.MSELoss()
     buffer: List[PPOActionRecord] = field(factory=list)
 
     def __attrs_post_init__(self):
@@ -295,7 +295,7 @@ class TrainablePPOAgent(PPOAgent):
             rewards.insert(0, discounted_reward)
         return torch.tensor(rewards, dtype=torch.float32)
     
-    def optimize_policy(self, epochs: int):
+    def optimize_policy(self, epochs: int, minibatch_size: int = 64) -> float:
         if not self.buffer:
             return
         _states = torch.stack([record.state for record in self.buffer])
@@ -312,13 +312,28 @@ class TrainablePPOAgent(PPOAgent):
         rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-5)
         # calculate advantages
         advantages = rewards.detach() - old_state_values.detach()
+
+        # Break the entire buffer into mini-batches of size minibatch_size
+        batch_idx = [i for i in range(0, len(self.buffer), minibatch_size)]
+        # randomly shuffle the mini-batches
+        np.random.shuffle(batch_idx)
         for epoch in range(epochs):
-            self._epoch_iter(epoch, old_states, old_actions, old_logprobs, rewards, advantages)
+            for idx in batch_idx:
+                self._epoch_iter(
+                    epoch,
+                    old_states[idx:idx+minibatch_size],
+                    old_actions[idx:idx+minibatch_size],
+                    old_logprobs[idx:idx+minibatch_size],
+                    rewards[idx:idx+minibatch_size],
+                    advantages[idx:idx+minibatch_size]
+                    )
 
         # Copy new weights into old policy
         self.old_nn.load_state_dict(self.nn.state_dict())
 
         self.buffer.clear()
+
+        return self.loss_value
 
     def _epoch_iter(
             self,
@@ -346,7 +361,7 @@ class TrainablePPOAgent(PPOAgent):
 
         # final loss of clipped objective PPO
         loss = -torch.min(surr1, surr2) + self.value_loss_weight * \
-            self.loss(state_values, rewards) - self.entropy_weight * dist_entropy
+            self.mse(state_values, rewards) - self.entropy_weight * dist_entropy
 
         # take gradient step
         self.optimizer.zero_grad()
@@ -355,6 +370,7 @@ class TrainablePPOAgent(PPOAgent):
         torch.nn.utils.clip_grad_norm_(self.nn.actor.parameters(), self.max_grad_norm)
         torch.nn.utils.clip_grad_norm_(self.nn.critic.parameters(), self.max_grad_norm)
         self.optimizer.step()
+        self.loss_value = loss.mean().item()
     
     
     def save(self, model_path: str):

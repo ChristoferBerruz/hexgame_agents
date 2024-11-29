@@ -1,5 +1,6 @@
 import click
 from hexgame_agents.models import TrainablePPOAgent, ActorCriticNN, PPOAgent
+from hexgame_agents.protocols import Agent
 
 from ourhexgame.ourhexenv import OurHexGame
 import torch
@@ -14,8 +15,17 @@ from ray.train import Checkpoint
 from ray.tune.schedulers import ASHAScheduler
 import ray.cloudpickle as pickle
 from pathlib import Path
+import numpy as np
 
 from typing import Tuple
+
+
+class RandomAgent(Agent):
+    def select_action(self, observation, reward, termination, truncation, info):
+        actions = np.arange(0, 122)
+        mask = info["action_mask"]
+        valid_actions = [a for a in actions if mask[a]]
+        return np.random.choice(valid_actions)
 
 
 @click.group()
@@ -48,9 +58,9 @@ class SelfPlayTrainable(ray.tune.Trainable):
         )
         self.target_agent_score = 1400
         self.oponent_agent_score = 1400
+        self.batch_size = config["batch_size"]
 
     def step(self):
-        # Every trainable step is a full episode
         running_reward = 0
         target_agent_wins = 0
         for _ in range(self.config["games_per_step"]):
@@ -77,10 +87,9 @@ class SelfPlayTrainable(ray.tune.Trainable):
                     "player_1": "oponent",
                     "player_2": "target"
                 }
+            
             player_1_cumulative_reward, player_2_cumulative_reward, winner = self.play_episode(
                 player_1_agent, player_2_agent)
-            player_1_agent.optimize_policy(self.optimize_policy_epochs)
-            player_2_agent.optimize_policy(self.optimize_policy_epochs)
             # get only the reward from the perspective of the target agent
             if player_name_to_agent_name["player_1"] == "target":
                 running_reward += player_1_cumulative_reward
@@ -112,9 +121,13 @@ class SelfPlayTrainable(ray.tune.Trainable):
                     player_name_to_rating["player_1"],
                     1
                 )
+
+        target_loss = self.target_agent.optimize_policy(self.optimize_policy_epochs, self.batch_size)
+        self.oponent_agent.optimize_policy(self.optimize_policy_epochs)
         return {"average_reward": running_reward/self.config["games_per_step"], 
                 "target_agent_score": self.target_agent_score,
-                "target_agent_win_rate": target_agent_wins/self.config["games_per_step"]
+                "target_agent_win_rate": target_agent_wins/self.config["games_per_step"],
+                "target_loss": target_loss,
                 }
     
     def calculate_elo_rating(self, current_rating: float, opponent_rating: float, score: float, k: int = 32) -> float:
@@ -233,6 +246,11 @@ class SelfPlayTrainable(ray.tune.Trainable):
     type=int,
     default=10
 )
+@click.option(
+    "--games-per-step",
+    type=int,
+    default=None
+)
 def train_agent(
     sparse: bool,
     gpu: bool,
@@ -240,7 +258,8 @@ def train_agent(
     lr_critic: float,
     swap_rate: float,
     optimize_policy_epochs: int,
-    num_samples: int):
+    num_samples: int,
+    games_per_step: int):
     if not gpu:
         # Currently there is a bug in WSL2 that prevents Ray tune from auto-detecting
         # whether the current device is a GPU or not.
@@ -251,15 +270,16 @@ def train_agent(
         "lr_critic": lr_critic or tune.loguniform(1e-3, 1e-1),
         "lr_actor": lr_actor or tune.loguniform(1e-4, 1e-2),
         "swap_rate": swap_rate or tune.uniform(0.1, 0.5),
-        "games_per_step": 10,
+        "games_per_step": games_per_step or tune.choice([10, 20, 30, 40]),
         "optimize_policy_epochs": optimize_policy_epochs or tune.choice([1, 3, 5, 10]),
+        "batch_size": tune.choice([64, 128, 256, 512]),
         "sparse_flag": sparse,
     }
     scheduler = ASHAScheduler(
         max_t=10000,
         metric="average_reward",
         mode="max",
-        grace_period=2,
+        grace_period=10,
         reduction_factor=2
     )
     # TODO: Figure out a way to better schedule the cpus
@@ -294,28 +314,46 @@ def test_agent(
     checkpoint_file: str,
     sparse: bool,
 ):
-    env = OurHexGame(sparse_flag=sparse, render_mode="human")
-    agent: PPOAgent = PPOAgent.from_file(checkpoint_file, env=env)
-    env.reset()
-    for agent_name in env.agent_iter():
-        observation, reward, termination, truncation, info = env.last()
-        if termination or truncation:
-            action = None
-        elif agent_name == "player_1":
-            action_mask = info["action_mask"]
-            action = env.action_space(agent_name).sample(action_mask)
-        else:
-            action = agent.select_action(
-                observation,
-                reward,
-                termination,
-                truncation,
-                info
-            )
-        env.step(action)
-        time.sleep(0.5)
-    print("Game over. Freezing window for visual check.")
-    time.sleep(10)
+    env = OurHexGame(sparse_flag=sparse, render_mode=None)
+    smart_agent: PPOAgent = PPOAgent.from_file(checkpoint_file, env=env)
+    dumb_agent = RandomAgent(env)
+    def play_episode(env: OurHexGame, player_1: Agent, player_2: Agent):
+        env.reset()
+        episode_cumulative_reward_per_agent = {
+            "player_1": 0,
+            "player_2": 0
+        }
+        agent_names_to_agents = {
+            "player_1": player_1,
+            "player_2": player_2
+        }
+        for agent_name in env.agent_iter():
+            observation, reward, termination, truncation, info = env.last()
+            episode_cumulative_reward_per_agent[agent_name] += reward
+            agent = agent_names_to_agents[agent_name]
+            if termination or truncation:
+                action = None
+            else:
+                action = agent.select_action(
+                    observation,
+                    reward,
+                    termination,
+                    truncation,
+                    info
+                )
+            env.step(action)
+        player_1_reward = episode_cumulative_reward_per_agent["player_1"]
+        player_2_reward = episode_cumulative_reward_per_agent["player_2"]
+        winner = "player_1" if player_1_reward > player_2_reward else "player_2"
+        return episode_cumulative_reward_per_agent, winner
+    total_wins = 0
+    for g in range(100):
+        print(f"Playing game: {g}")
+        _, winner = play_episode(env, dumb_agent, smart_agent)
+        if winner == "player_2":
+            total_wins += 1
+    print(f"Win rate: {total_wins/100}")
+
 
 
 def main():
