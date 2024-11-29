@@ -345,12 +345,15 @@ class TrainablePPOAgent(PPOAgent):
                             1+self.clip_eps) * advantages
 
         # final loss of clipped objective PPO
-        loss = -torch.min(surr1, surr2) + 0.5 * \
-            self.loss(state_values, rewards) - 0.01 * dist_entropy
+        loss = -torch.min(surr1, surr2) + self.value_loss_weight * \
+            self.loss(state_values, rewards) - self.entropy_weight * dist_entropy
 
         # take gradient step
         self.optimizer.zero_grad()
         loss.mean().backward()
+        # clip the gradients to the max_grad_norm
+        torch.nn.utils.clip_grad_norm_(self.nn.actor.parameters(), self.max_grad_norm)
+        torch.nn.utils.clip_grad_norm_(self.nn.critic.parameters(), self.max_grad_norm)
         self.optimizer.step()
     
     

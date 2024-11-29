@@ -109,7 +109,7 @@ class SelfPlayTrainable(ray.tune.Trainable):
                     1
                 )
         return {"average_reward": running_reward/self.config["games_per_step"], 
-                "target_agent_score": self.target_agent_score
+                "target_agent_score": self.target_agent_score,
                 }
     
     def calculate_elo_rating(self, current_rating: float, opponent_rating: float, score: float, k: int = 32) -> float:
@@ -157,9 +157,13 @@ class SelfPlayTrainable(ray.tune.Trainable):
                 )
             env.step(action)
 
+        if episode_cumulative_reward_per_agent["player_1"] > episode_cumulative_reward_per_agent["player_2"]:
+            winner = "player_1"
+        else:
+            winner = "player_2"
         return (episode_cumulative_reward_per_agent["player_1"],
                 episode_cumulative_reward_per_agent["player_2"],
-                env.winner)
+                winner)
     
     def save_checkpoint(self, checkpoint_dir: str):
         checkpoint_data = {
@@ -199,23 +203,55 @@ class SelfPlayTrainable(ray.tune.Trainable):
 @cli.command()
 @click.option("--sparse/--no-sparse", is_flag=True, default=False)
 @click.option("--gpu/--no-gpu", is_flag=True, default=False)
-def train_agent(sparse: bool, gpu: bool):
+@click.option(
+    "--lr-actor",
+    type=float,
+    default=None
+)
+@click.option(
+    "--lr-critic",
+    type=float,
+    default=None
+)
+@click.option(
+    "--swap-rate",
+    type=float,
+    default=None
+)
+@click.option(
+    "--optimize-policy-epochs",
+    type=int,
+    default=None
+)
+@click.option(
+    "--num-samples",
+    type=int,
+    default=10
+)
+def train_agent(
+    sparse: bool,
+    gpu: bool,
+    lr_actor: float,
+    lr_critic: float,
+    swap_rate: float,
+    optimize_policy_epochs: int,
+    num_samples: int):
     if not gpu:
         # Currently there is a bug in WSL2 that prevents Ray tune from auto-detecting
         # whether the current device is a GPU or not.
         # A quick and dirty fix is to directly inform RAY that the current device is a CPU.
         ray.init(num_gpus=0)
         print("--no-gpu flag detected. Forcing Ray to run on CPU.")
-    num_samples = 10
     config = {
-        "lr_critic": tune.loguniform(1e-4, 1e-1),
-        "lr_actor": tune.loguniform(1e-4, 1e-1),
-        "swap_rate": tune.uniform(0.1, 0.9),
+        "lr_critic": lr_critic or tune.loguniform(1e-3, 1e-1),
+        "lr_actor": lr_actor or tune.loguniform(1e-4, 1e-2),
+        "swap_rate": swap_rate or tune.uniform(0.1, 0.5),
         "games_per_step": 10,
-        "optimize_policy_epochs": 80,
+        "optimize_policy_epochs": optimize_policy_epochs or tune.choice([1, 3, 5, 10]),
         "sparse_flag": sparse,
     }
     scheduler = ASHAScheduler(
+        max_t=10000,
         metric="average_reward",
         mode="max",
         grace_period=2,
@@ -232,7 +268,7 @@ def train_agent(sparse: bool, gpu: bool):
         checkpoint_config=train.CheckpointConfig(checkpoint_frequency=1)
     )
 
-    best_trial = result.get_best_trial("average_reward", "max", "avg")
+    best_trial = result.get_best_trial("average_reward", "max", "last")
     print(f"Best trial config: {best_trial.config}")
     print(
         f"Best trial average reward: {best_trial.last_result['average_reward']}")
@@ -273,7 +309,9 @@ def test_agent(
             )
         env.step(action)
         time.sleep(0.5)
-    print("Winner: ", env.winner)
+    print("Game over. Freezing window for visual check.")
+    time.sleep(10)
+
 
 def main():
     cli()
