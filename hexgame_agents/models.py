@@ -58,7 +58,9 @@ class CategoricalMasked(torch.distributions.Categorical):
         self.tensor_mask = torch.stack([mask.bool()]*self.batch, dim=0)
         self.all_zeros = torch.zeros_like(probs)
         probs = torch.where(self.tensor_mask, probs, self.all_zeros)
-        super(CategoricalMasked, self).__init__(probs=probs)
+        # use validate_args=False to avoid NaN which happens
+        # due to the number of actions.
+        super(CategoricalMasked, self).__init__(probs=probs, validate_args=False)
 
     def entropy(self):
         # Elementwise multiplication
@@ -200,7 +202,7 @@ class PPOActionRecord:
     state_val: torch.Tensor
     reward: float
     done: bool = False
-    
+
 
 @define
 class PPOAgent(Agent):
@@ -262,13 +264,21 @@ class TrainablePPOAgent(PPOAgent):
         self.old_nn = ActorCriticNN()
         self.old_nn.load_state_dict(self.nn.state_dict())
         self.to(self.device)
+        self._previous_record = None
 
     def select_action(self, observation, reward, termination, truncation, info) -> int:
         board = observation["observation"]
         mask = info["action_mask"]
         action, action_logprob, state_val, state = self._select_action(board, mask, nn=self.old_nn)
-        record = PPOActionRecord(state, action, action_logprob, state_val, 0.0)
-        self.buffer.append(record)
+        # We bufffer a temporary record, because the reward and termination or truncation
+        # is not yet available.
+        if self._previous_record:
+            self._previous_record.reward = reward
+            self._previous_record.done = termination or truncation
+            self.buffer.append(self._previous_record)
+            self._previous_record = None
+        else:
+            self._previous_record = PPOActionRecord(state, action, action_logprob, state_val, 0.0)
         return action.item()
     
     def get_discounted_rewards(self) -> torch.Tensor:
@@ -286,7 +296,7 @@ class TrainablePPOAgent(PPOAgent):
         return torch.tensor(rewards, dtype=torch.float32)
     
     def optimize_policy(self, epochs: int):
-        if len(self.buffer) < 10:
+        if not self.buffer:
             return
         _states = torch.stack([record.state for record in self.buffer])
         _actions = torch.stack([record.action for record in self.buffer])

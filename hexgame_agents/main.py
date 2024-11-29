@@ -10,11 +10,10 @@ import time
 import ray
 from ray import tune
 from ray import train
-from ray.train import Checkpoint, get_checkpoint
+from ray.train import Checkpoint
 from ray.tune.schedulers import ASHAScheduler
 import ray.cloudpickle as pickle
 from pathlib import Path
-import tempfile
 
 from typing import Tuple
 
@@ -47,6 +46,8 @@ class SelfPlayTrainable(ray.tune.Trainable):
             lr_actor=self.lr_actor,
             lr_critic=self.lr_critic
         )
+        self.target_agent_score = 1400
+        self.oponent_agent_score = 1400
 
     def step(self):
         # Every trainable step is a full episode
@@ -56,16 +57,64 @@ class SelfPlayTrainable(ray.tune.Trainable):
             if random.random() < self.swap_rate:
                 player_1_agent = self.target_agent
                 player_2_agent = self.oponent_agent
+                player_name_to_rating = {
+                    "player_1": self.target_agent_score,
+                    "player_2": self.oponent_agent_score
+                }
+                player_name_to_agent_name = {
+                    "player_1": "target",
+                    "player_2": "oponent"
+                }
             else:
                 player_1_agent = self.oponent_agent
                 player_2_agent = self.target_agent
+                player_name_to_rating = {
+                    "player_1": self.oponent_agent_score,
+                    "player_2": self.target_agent_score
+                }
+                player_name_to_agent_name = {
+                    "player_1": "oponent",
+                    "player_2": "target"
+                }
             player_1_cumulative_reward, player_2_cumulative_reward, winner = self.play_episode(
                 player_1_agent, player_2_agent)
             player_1_agent.optimize_policy(self.optimize_policy_epochs)
             player_2_agent.optimize_policy(self.optimize_policy_epochs)
-            running_reward += player_1_cumulative_reward + player_2_cumulative_reward
-            running_reward /= 2
-        return {"average_reward": running_reward/self.config["games_per_step"]}
+            # get only the reward from the perspective of the target agent
+            if player_name_to_agent_name["player_1"] == "target":
+                running_reward += player_1_cumulative_reward
+            else:
+                running_reward += player_2_cumulative_reward
+            # Calculate the new ELO rating for the agents
+            if winner == "player_1":
+                self.target_agent_score = self.calculate_elo_rating(
+                    self.target_agent_score,
+                    player_name_to_rating["player_2"],
+                    1
+                )
+                self.oponent_agent_score = self.calculate_elo_rating(
+                    self.oponent_agent_score,
+                    player_name_to_rating["player_1"],
+                    0
+                )
+            elif winner == "player_2":
+                self.target_agent_score = self.calculate_elo_rating(
+                    self.target_agent_score,
+                    player_name_to_rating["player_2"],
+                    0
+                )
+                self.oponent_agent_score = self.calculate_elo_rating(
+                    self.oponent_agent_score,
+                    player_name_to_rating["player_1"],
+                    1
+                )
+        return {"average_reward": running_reward/self.config["games_per_step"], 
+                "target_agent_score": self.target_agent_score
+                }
+    
+    def calculate_elo_rating(self, current_rating: float, opponent_rating: float, score: float, k: int = 32) -> float:
+        expected_score = 1 / (1 + 10 ** ((opponent_rating - current_rating) / 400))
+        return current_rating + k * (score - expected_score)
             
 
     def play_episode(
@@ -96,9 +145,6 @@ class SelfPlayTrainable(ray.tune.Trainable):
             observation, reward, termination, truncation, info = env.last()
             episode_cumulative_reward_per_agent[agent_name] += reward
             agent = agent_names_to_agents[agent_name]
-            if agent.buffer:
-                agent.buffer[-1].reward = reward
-                agent.buffer[-1].done = termination or truncation
             if termination or truncation:
                 action = None
             else:
@@ -115,39 +161,39 @@ class SelfPlayTrainable(ray.tune.Trainable):
                 episode_cumulative_reward_per_agent["player_2"],
                 env.winner)
     
-    def save_checkpoint(self):
+    def save_checkpoint(self, checkpoint_dir: str):
         checkpoint_data = {
             "nn_state_dict": self.target_agent.nn.state_dict(),
             "old_nn_state_dict": self.target_agent.old_nn.state_dict(),
             "optimizer_state_dict": self.target_agent.optimizer.state_dict(),
             "oponent_nn_state_dict": self.oponent_agent.nn.state_dict(),
             "oponent_old_nn_state_dict": self.oponent_agent.old_nn.state_dict(),
-            "oponent_optimizer_state_dict": self.oponent_agent.optimizer.state_dict()
+            "oponent_optimizer_state_dict": self.oponent_agent.optimizer.state_dict(),
+            "target_agent_score": self.target_agent_score,
+            "oponent_agent_score": self.oponent_agent_score
         }
-        with tempfile.TemporaryDirectory() as checkpoint_dir:
-            data_path = Path(checkpoint_dir) / "data.pkl"
-            with open(data_path, "wb") as fp:
-                pickle.dump(checkpoint_data, fp)
+        data_path = Path(checkpoint_dir) / "data.pkl"
+        with open(data_path, "wb") as fp:
+            pickle.dump(checkpoint_data, fp)
 
-            return Checkpoint.from_directory(checkpoint_dir)
+        return Checkpoint.from_directory(checkpoint_dir)
 
-    def load_checkpoint(self):
-        checkpoint = get_checkpoint()
-        if checkpoint:
-            with checkpoint.as_directory() as checkpoint_dir:
-                data_path = Path(checkpoint_dir) / "data.pkl"
-                with open(data_path, "rb") as fp:
-                    checkpoint_state = pickle.load(fp)
-                self.target_agent.nn.load_state_dict(checkpoint_state["nn_state_dict"])
-                self.target_agent.old_nn.load_state_dict(
-                    checkpoint_state["old_nn_state_dict"])
-                self.target_agent.optimizer.load_state_dict(
-                    checkpoint_state["optimizer_state_dict"])
-                self.oponent_agent.nn.load_state_dict(checkpoint_state["oponent_nn_state_dict"])
-                self.oponent_agent.old_nn.load_state_dict(
-                    checkpoint_state["oponent_old_nn_state_dict"])
-                self.oponent_agent.optimizer.load_state_dict(
-                    checkpoint_state["oponent_optimizer_state_dict"])
+    def load_checkpoint(self, checkpoint_dir: str):
+        data_path = Path(checkpoint_dir) / "data.pkl"
+        with open(data_path, "rb") as fp:
+            checkpoint_state = pickle.load(fp)
+        self.target_agent.nn.load_state_dict(checkpoint_state["nn_state_dict"])
+        self.target_agent.old_nn.load_state_dict(
+            checkpoint_state["old_nn_state_dict"])
+        self.target_agent.optimizer.load_state_dict(
+            checkpoint_state["optimizer_state_dict"])
+        self.oponent_agent.nn.load_state_dict(checkpoint_state["oponent_nn_state_dict"])
+        self.oponent_agent.old_nn.load_state_dict(
+            checkpoint_state["oponent_old_nn_state_dict"])
+        self.oponent_agent.optimizer.load_state_dict(
+            checkpoint_state["oponent_optimizer_state_dict"])
+        self.target_agent_score = checkpoint_state["target_agent_score"]
+        self.oponent_agent_score = checkpoint_state["oponent_agent_score"]
 
 
 @cli.command()
@@ -183,6 +229,7 @@ def train_agent(sparse: bool, gpu: bool):
         num_samples=num_samples,
         resources_per_trial={"cpu": 2},
         scheduler=scheduler,
+        checkpoint_config=train.CheckpointConfig(checkpoint_frequency=1)
     )
 
     best_trial = result.get_best_trial("average_reward", "max", "avg")
