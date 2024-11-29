@@ -15,3 +15,6 @@ def get_board_coordinate_for_action(action: int) -> Tuple[int, int]:
 
 def get_action_from_coordinate(row: int, col: int) -> int:
     return row * BOARD_SIZE + col
+
+def flatten_observation(obs: dict):
+    return tuple([tile for row in obs['observation'] for tile in row] + [obs['pie_rule_used']])
