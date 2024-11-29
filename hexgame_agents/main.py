@@ -52,6 +52,7 @@ class SelfPlayTrainable(ray.tune.Trainable):
     def step(self):
         # Every trainable step is a full episode
         running_reward = 0
+        target_agent_wins = 0
         for _ in range(self.config["games_per_step"]):
             # The swap rate is the probability of swapping the agents
             if random.random() < self.swap_rate:
@@ -85,6 +86,9 @@ class SelfPlayTrainable(ray.tune.Trainable):
                 running_reward += player_1_cumulative_reward
             else:
                 running_reward += player_2_cumulative_reward
+            # calculate win_rate
+            if player_name_to_agent_name[winner] == "target":
+                target_agent_wins += 1
             # Calculate the new ELO rating for the agents
             if winner == "player_1":
                 self.target_agent_score = self.calculate_elo_rating(
@@ -110,6 +114,7 @@ class SelfPlayTrainable(ray.tune.Trainable):
                 )
         return {"average_reward": running_reward/self.config["games_per_step"], 
                 "target_agent_score": self.target_agent_score,
+                "target_agent_win_rate": target_agent_wins/self.config["games_per_step"]
                 }
     
     def calculate_elo_rating(self, current_rating: float, opponent_rating: float, score: float, k: int = 32) -> float:
