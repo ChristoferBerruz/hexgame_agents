@@ -1,23 +1,11 @@
 from typing import Any
-
-from attrs import define
+import os
 from ourhexgame.ourhexenv import OurHexGame
 
 from hexgame_agents.protocols import Agent
 
+from hexgame_agents.models import PPOAgent
 
-@define
-class SparseRewardAgent(Agent):
-
-    def select_action(observation, reward, termination, truncation, info) -> int:
-        pass
-
-
-@define
-class DenseRewardAgent(Agent):
-
-    def select_action(observation, reward, termination, truncation, info) -> int:
-        pass
 
 
 class G07Agent(Agent):
@@ -25,9 +13,16 @@ class G07Agent(Agent):
     """
     def __init__(self, env: OurHexGame) -> "G07Agent":
         if env.sparse_flag:
-            self.agent = SparseRewardAgent(env)
+            agent_file = os.environ.get("G07AGENT_SPARSE", None)
+            if not agent_file:
+                raise ValueError("G07AGENT_SPARSE environment variable not set")
+            self.agent = PPOAgent.from_file(agent_file, env=env)
         else:
-            self.agent = DenseRewardAgent(env)
+            agent_file = os.environ.get("G07AGENT_DENSE", None)
+            if not agent_file:
+                raise ValueError("G07AGENT_DENSE environment variable not set")
+            self.agent = PPOAgent.from_file(agent_file, env=env)
+            self.env = env
 
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self.agent, name)
+    def select_action(self, observation, reward, termination, truncation, info):
+        return self.agent.select_action(observation, reward, termination, truncation, info)
