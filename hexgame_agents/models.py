@@ -116,6 +116,12 @@ class BaseNN(torch.nn.Module):
         torch.save(self.state_dict(), model_path)
 
 
+def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
+    torch.nn.init.orthogonal_(layer.weight, std)
+    torch.nn.init.constant_(layer.bias, bias_const)
+    return layer
+
+
 
 class CNNApproximator(BaseNN):
     """A Convolutional Neural network approximator.
@@ -130,17 +136,17 @@ class CNNApproximator(BaseNN):
         self.board_shape = board_shape
         self.height, self.width = board_shape
         self.first_cnn_block = torch.nn.Sequential(
-            torch.nn.Conv2d(in_channels, 64, kernel_size=3, stride=1, padding=1),
+            layer_init(torch.nn.Conv2d(in_channels, 64, kernel_size=3, stride=1, padding=1)),
             torch.nn.Tanh(),
             torch.nn.AvgPool2d(kernel_size=2, stride=2),
         )
         self.second_cnn_block = torch.nn.Sequential(
-            torch.nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1),
+            layer_init(torch.nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1)),
             torch.nn.Tanh(),
             torch.nn.AvgPool2d(kernel_size=2, stride=2),
         )
         self.fc = torch.nn.Sequential(
-            torch.nn.Linear(4*128, first_fc_units),
+            layer_init(torch.nn.Linear(4*128, first_fc_units)),
             torch.nn.ReLU(),
         )
         self.output_dim = first_fc_units
@@ -166,12 +172,12 @@ class ActorCriticNN(BaseNN):
         self.critic_cnn = CNNApproximator()
         self.actor = torch.nn.Sequential(
             self.actor_cnn,
-            torch.nn.Linear(self.actor_cnn.output_dim, gu.ACTION_SPACE),
+            layer_init(torch.nn.Linear(self.actor_cnn.output_dim, gu.ACTION_SPACE), std=0.01),
             torch.nn.Softmax(dim=-1),
         )
         self.critic = torch.nn.Sequential(
             self.critic_cnn,
-            torch.nn.Linear(self.critic_cnn.output_dim, 1),
+            layer_init(torch.nn.Linear(self.critic_cnn.output_dim, 1), std=1.0),
         )
 
     @board_adapter
