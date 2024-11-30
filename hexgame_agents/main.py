@@ -256,6 +256,11 @@ class SelfPlayTrainable(ray.tune.Trainable):
     type=int,
     default=None
 )
+@click.option(
+    "--num-cpus",
+    type=int,
+    help="Number of CPUs to use for training. Do not set for automatic detection.",
+)
 def train_agent(
     sparse: bool,
     gpu: bool,
@@ -265,7 +270,9 @@ def train_agent(
     optimize_policy_epochs: int,
     num_samples: int,
     games_per_step: int,
-    batch_size: int):
+    batch_size: int,
+    num_cpus: int
+    ):
     if not gpu:
         # Currently there is a bug in WSL2 that prevents Ray tune from auto-detecting
         # whether the current device is a GPU or not.
@@ -294,7 +301,7 @@ def train_agent(
         SelfPlayTrainable,
         config=config,
         num_samples=num_samples,
-        resources_per_trial={"cpu": 2},
+        resources_per_trial={"cpu": num_cpus} if num_cpus else None,
         scheduler=scheduler,
         checkpoint_config=train.CheckpointConfig(checkpoint_frequency=1)
     )

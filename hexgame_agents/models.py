@@ -122,6 +122,76 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     return layer
 
 
+class ResidualBlock(torch.nn.Module):
+    def __init__(self, in_channels, out_channels, stride=1, downsample=None):
+        super(ResidualBlock, self).__init__()
+        self.conv1 = torch.nn.Sequential(
+            layer_init(torch.nn.Conv2d(in_channels, out_channels,
+                        kernel_size=3, stride=stride, padding=1)),
+            torch.nn.BatchNorm2d(out_channels),
+            torch.nn.ReLU())
+        self.conv2 = torch.nn.Sequential(
+            layer_init(torch.nn.Conv2d(out_channels, out_channels,
+                        kernel_size=3, stride=1, padding=1)),
+            torch.nn.BatchNorm2d(out_channels))
+        self.downsample = downsample
+        self.relu = torch.nn.ReLU()
+        self.out_channels = out_channels
+
+    def forward(self, x):
+        residual = x
+        out = self.conv1(x)
+        out = self.conv2(out)
+        if self.downsample:
+            residual = self.downsample(x)
+        out += residual
+        out = self.relu(out)
+        return out
+
+
+class ResNet(torch.nn.Module):
+    def __init__(self):
+        super(ResNet, self).__init__()
+        self.inplanes = 64
+        self.conv1 = torch.nn.Sequential(
+            layer_init(torch.nn.Conv2d(3, 64, kernel_size=2, stride=2, padding=3)),
+            torch.nn.BatchNorm2d(64),
+            torch.nn.Tanh())
+        block = ResidualBlock
+        self.residual_block = self._make_layer(block, 256, 7, stride=1)
+        self.output_dim = 512
+        self.fc = torch.nn.Sequential(
+            torch.nn.Linear(16384, self.output_dim),
+            torch.nn.ReLU(),
+        )
+
+    def _make_layer(self, block, planes, blocks, stride=1):
+        downsample = None
+        if stride != 1 or self.inplanes != planes:
+
+            downsample = torch.nn.Sequential(
+                torch.nn.Conv2d(self.inplanes, planes,
+                            kernel_size=1, stride=stride),
+                torch.nn.BatchNorm2d(planes),
+            )
+        layers = []
+        layers.append(block(self.inplanes, planes, stride, downsample))
+        self.inplanes = planes
+        for _ in range(1, blocks):
+            layers.append(block(self.inplanes, planes))
+
+        return torch.nn.Sequential(*layers)
+
+    def forward(self, x):
+        if len(x.shape) == 3:
+            x = x.unsqueeze(0)
+        x = self.conv1(x)
+        x = self.residual_block(x)
+        x = x.view(x.size(0), -1)
+        x = self.fc(x)
+        return x
+
+
 
 class CNNApproximator(BaseNN):
     """A Convolutional Neural network approximator.
@@ -168,8 +238,8 @@ class ActorCriticNN(BaseNN):
 
     def __init__(self):
         super(ActorCriticNN, self).__init__()
-        self.actor_cnn = CNNApproximator()
-        self.critic_cnn = CNNApproximator()
+        self.actor_cnn = ResNet()
+        self.critic_cnn = ResNet()
         self.actor = torch.nn.Sequential(
             self.actor_cnn,
             layer_init(torch.nn.Linear(self.actor_cnn.output_dim, gu.ACTION_SPACE), std=0.01),
