@@ -261,6 +261,10 @@ class SelfPlayTrainable(ray.tune.Trainable):
     type=int,
     help="Number of CPUs to use for training. Do not set for automatic detection.",
 )
+@click.option(
+    "--log-dir",
+    envvar="TUNE_LOG_DIR",
+)
 def train_agent(
     sparse: bool,
     gpu: bool,
@@ -271,7 +275,8 @@ def train_agent(
     num_samples: int,
     games_per_step: int,
     batch_size: int,
-    num_cpus: int
+    num_cpus: int,
+    log_dir: str,
     ):
     if not gpu:
         # Currently there is a bug in WSL2 that prevents Ray tune from auto-detecting
@@ -315,6 +320,7 @@ def train_agent(
         num_samples=num_samples,
         scheduler=scheduler,
         checkpoint_config=train.CheckpointConfig(checkpoint_frequency=1),
+        storage_path=log_dir or None
     )
 
     best_trial = result.get_best_trial("average_reward", "max", "last")
