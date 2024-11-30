@@ -295,15 +295,26 @@ def train_agent(
         grace_period=10,
         reduction_factor=2
     )
+
+    # detect gpus
+    if torch.cuda.is_available():
+        trainable = tune.with_resources(
+            SelfPlayTrainable, resources={"gpu": 1}
+            )
+    elif num_cpus:
+        trainable = tune.with_resources(
+            SelfPlayTrainable, resources={"cpu": num_cpus}
+            )
+    else:
+        trainable = SelfPlayTrainable
     # TODO: Figure out a way to better schedule the cpus
     # to avoid running out of memory.
     result = tune.run(
-        SelfPlayTrainable,
+        trainable,
         config=config,
         num_samples=num_samples,
-        resources_per_trial={"cpu": num_cpus} if num_cpus else None,
         scheduler=scheduler,
-        checkpoint_config=train.CheckpointConfig(checkpoint_frequency=1)
+        checkpoint_config=train.CheckpointConfig(checkpoint_frequency=1),
     )
 
     best_trial = result.get_best_trial("average_reward", "max", "last")
