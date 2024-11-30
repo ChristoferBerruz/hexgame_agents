@@ -251,6 +251,11 @@ class SelfPlayTrainable(ray.tune.Trainable):
     type=int,
     default=None
 )
+@click.option(
+    "--batch-size",
+    type=int,
+    default=None
+)
 def train_agent(
     sparse: bool,
     gpu: bool,
@@ -259,7 +264,8 @@ def train_agent(
     swap_rate: float,
     optimize_policy_epochs: int,
     num_samples: int,
-    games_per_step: int):
+    games_per_step: int,
+    batch_size: int):
     if not gpu:
         # Currently there is a bug in WSL2 that prevents Ray tune from auto-detecting
         # whether the current device is a GPU or not.
@@ -272,7 +278,7 @@ def train_agent(
         "swap_rate": swap_rate or tune.uniform(0.1, 0.5),
         "games_per_step": games_per_step or tune.choice([10, 20, 30, 40]),
         "optimize_policy_epochs": optimize_policy_epochs or tune.choice([1, 3, 5, 10]),
-        "batch_size": tune.choice([64, 128, 256, 512]),
+        "batch_size": batch_size or tune.choice([64, 128, 256, 512]),
         "sparse_flag": sparse,
     }
     scheduler = ASHAScheduler(
