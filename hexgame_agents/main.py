@@ -6,6 +6,7 @@ from ourhexgame.ourhexenv import OurHexGame
 import torch
 
 import random
+from copy import deepcopy
 
 import time
 import ray
@@ -40,30 +41,28 @@ class SelfPlayTrainable(ray.tune.Trainable):
         self.lr_critic = config["lr_critic"]
         self.swap_rate = config["swap_rate"]
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        env = OurHexGame(sparse_flag=self.config["sparse_flag"], render_mode=None)
+        self.env = OurHexGame(sparse_flag=self.config["sparse_flag"], render_mode=None)
         self.optimize_policy_epochs = config["optimize_policy_epochs"]
         self.target_agent = TrainablePPOAgent(
-            env,
+            self.env,
             ActorCriticNN(),
             device=self.device,
             lr_actor=self.lr_actor,
             lr_critic=self.lr_critic
         )
-        self.oponent_agent = TrainablePPOAgent(
-            env,
-            ActorCriticNN(),
-            device=self.device,
-            lr_actor=self.lr_actor,
-            lr_critic=self.lr_critic
-        )
+        self.oponent_agent = RandomAgent(self.env)
         self.target_agent_score = 1400
         self.oponent_agent_score = 1400
         self.batch_size = config["batch_size"]
+        self.play_style = "random"
+        self.target_agent_wins = 0
+        self.games_played = 0
 
     def step(self):
         running_reward = 0
         target_agent_wins = 0
         for _ in range(self.config["games_per_step"]):
+            self.games_played += 1
             # The swap rate is the probability of swapping the agents
             if random.random() < self.swap_rate:
                 player_1_agent = self.target_agent
@@ -98,6 +97,7 @@ class SelfPlayTrainable(ray.tune.Trainable):
             # calculate win_rate
             if player_name_to_agent_name[winner] == "target":
                 target_agent_wins += 1
+                self.target_agent_wins += 1
             # Calculate the new ELO rating for the agents
             if winner == "player_1":
                 self.target_agent_score = self.calculate_elo_rating(
@@ -123,7 +123,20 @@ class SelfPlayTrainable(ray.tune.Trainable):
                 )
 
         target_loss = self.target_agent.optimize_policy(self.optimize_policy_epochs, self.batch_size)
-        self.oponent_agent.optimize_policy(self.optimize_policy_epochs)
+        if self.play_style == "self-play":
+            self.target_agent.buffer.clear()
+        if self.training_iteration % 100 == 0:
+            overall_win_rate = self.target_agent_wins/self.games_played
+            if overall_win_rate > 0.9:
+                self.play_style = "self-play"
+                self.oponent_agent = TrainablePPOAgent(
+                    self.env,
+                    ActorCriticNN(),
+                    device=self.device
+                )
+                self.oponent_agent.nn.load_state_dict(deepcopy(self.target_agent.nn.state_dict()))
+                self.oponent_agent.old_nn.load_state_dict(deepcopy(self.target_agent.old_nn.state_dict()))
+                self.oponent_agent.optimizer.load_state_dict(deepcopy(self.target_agent.optimizer.state_dict()))
         return {"average_reward": running_reward/self.config["games_per_step"], 
                 "target_agent_score": self.target_agent_score,
                 "target_agent_win_rate": target_agent_wins/self.config["games_per_step"],
@@ -188,15 +201,24 @@ class SelfPlayTrainable(ray.tune.Trainable):
             "nn_state_dict": self.target_agent.nn.state_dict(),
             "old_nn_state_dict": self.target_agent.old_nn.state_dict(),
             "optimizer_state_dict": self.target_agent.optimizer.state_dict(),
-            "oponent_nn_state_dict": self.oponent_agent.nn.state_dict(),
-            "oponent_old_nn_state_dict": self.oponent_agent.old_nn.state_dict(),
-            "oponent_optimizer_state_dict": self.oponent_agent.optimizer.state_dict(),
             "target_agent_score": self.target_agent_score,
-            "oponent_agent_score": self.oponent_agent_score
+            "oponent_agent_score": self.oponent_agent_score,
+            "play_style": self.play_style,
+            "target_agent_wins": self.target_agent_wins,
+            "games_played": self.games_played
         }
+        if self.play_style == "random":
+            opponnent_nn_data = {}
+        else:
+            opponnent_nn_data = {
+                "oponent_nn_state_dict": self.oponent_agent.nn.state_dict(),
+                "oponent_old_nn_state_dict": self.oponent_agent.old_nn.state_dict(),
+                "oponent_optimizer_state_dict": self.oponent_agent.optimizer.state_dict()
+            }
         data_path = Path(checkpoint_dir) / "data.pkl"
         with open(data_path, "wb") as fp:
-            pickle.dump(checkpoint_data, fp)
+            all_data = {**checkpoint_data, **opponnent_nn_data}
+            pickle.dump(all_data, fp)
 
         return Checkpoint.from_directory(checkpoint_dir)
 
@@ -209,13 +231,18 @@ class SelfPlayTrainable(ray.tune.Trainable):
             checkpoint_state["old_nn_state_dict"])
         self.target_agent.optimizer.load_state_dict(
             checkpoint_state["optimizer_state_dict"])
-        self.oponent_agent.nn.load_state_dict(checkpoint_state["oponent_nn_state_dict"])
-        self.oponent_agent.old_nn.load_state_dict(
-            checkpoint_state["oponent_old_nn_state_dict"])
-        self.oponent_agent.optimizer.load_state_dict(
-            checkpoint_state["oponent_optimizer_state_dict"])
         self.target_agent_score = checkpoint_state["target_agent_score"]
         self.oponent_agent_score = checkpoint_state["oponent_agent_score"]
+        self.play_style = checkpoint_state["play_style"]
+        self.target_agent_wins = checkpoint_state["target_agent_wins"]
+        self.games_played = checkpoint_state["games_played"]
+        if self.play_style != "random":
+            self.oponent_agent.nn.load_state_dict(
+                checkpoint_state["oponent_nn_state_dict"])
+            self.oponent_agent.old_nn.load_state_dict(
+                checkpoint_state["oponent_old_nn_state_dict"])
+            self.oponent_agent.optimizer.load_state_dict(
+                checkpoint_state["oponent_optimizer_state_dict"])
 
 
 @cli.command()
@@ -265,6 +292,11 @@ class SelfPlayTrainable(ray.tune.Trainable):
     "--log-dir",
     envvar="TUNE_LOG_DIR",
 )
+@click.option(
+    "--max-t",
+    type=int,
+    default=10000
+)
 def train_agent(
     sparse: bool,
     gpu: bool,
@@ -277,6 +309,7 @@ def train_agent(
     batch_size: int,
     num_cpus: int,
     log_dir: str,
+    max_t: int
     ):
     if not gpu:
         # Currently there is a bug in WSL2 that prevents Ray tune from auto-detecting
@@ -294,7 +327,7 @@ def train_agent(
         "sparse_flag": sparse,
     }
     scheduler = ASHAScheduler(
-        max_t=10000,
+        max_t=max_t,
         metric="average_reward",
         mode="max",
         grace_period=10,
@@ -302,7 +335,7 @@ def train_agent(
     )
 
     # detect gpus
-    if torch.cuda.is_available():
+    if gpu and torch.cuda.is_available():
         trainable = tune.with_resources(
             SelfPlayTrainable, resources={"gpu": 1}
             )
@@ -319,7 +352,7 @@ def train_agent(
         config=config,
         num_samples=num_samples,
         scheduler=scheduler,
-        checkpoint_config=train.CheckpointConfig(checkpoint_frequency=1),
+        checkpoint_config=train.CheckpointConfig(num_to_keep=10, checkpoint_frequency=1),
         storage_path=log_dir or None
     )
 
