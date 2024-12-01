@@ -154,14 +154,14 @@ class ResNet(torch.nn.Module):
         super(ResNet, self).__init__()
         self.inplanes = 64
         self.conv1 = torch.nn.Sequential(
-            layer_init(torch.nn.Conv2d(3, 64, kernel_size=2, stride=2, padding=3)),
+            layer_init(torch.nn.Conv2d(3, 64, kernel_size=2, stride=1)),
             torch.nn.BatchNorm2d(64),
             torch.nn.Tanh())
         block = ResidualBlock
-        self.residual_block = self._make_layer(block, 256, 7, stride=1)
+        self.residual_block = self._make_layer(block, 256, 4, stride=1)
         self.output_dim = 512
         self.fc = torch.nn.Sequential(
-            torch.nn.Linear(16384, self.output_dim),
+            torch.nn.Linear(25600, self.output_dim),
             torch.nn.ReLU(),
         )
 
