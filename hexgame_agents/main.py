@@ -318,8 +318,8 @@ def train_agent(
         ray.init(num_gpus=0)
         print("--no-gpu flag detected. Forcing Ray to run on CPU.")
     config = {
-        "lr_critic": lr_critic or tune.loguniform(1e-3, 1e-1),
-        "lr_actor": lr_actor or tune.loguniform(1e-4, 1e-2),
+        "lr_critic": lr_critic or tune.loguniform(1e-5, 1e-2),
+        "lr_actor": lr_actor or tune.loguniform(1e-5, 1e-2),
         "swap_rate": swap_rate or tune.uniform(0.1, 0.5),
         "games_per_step": games_per_step or tune.choice([10, 20, 30, 40]),
         "optimize_policy_epochs": optimize_policy_epochs or tune.choice([1, 3, 5, 10]),
