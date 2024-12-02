@@ -6,9 +6,9 @@ import math
 import random
 
 class Node:
-    def __init__(self, state, local_env, termination, parent=None):
+    def __init__(self, state, local_env: OurHexGame, terminations, parent=None):
         self.state = state
-        self.is_terminal_state = termination
+        self.terminations = terminations
         self.parent = parent
         self.children = []
         self.visits = 0
@@ -32,22 +32,25 @@ class Node:
         return child_node
 
     def is_terminal(self):
-        return self.is_terminal_state
+        return True in self.terminations.values()
 
     def get_legal_actions(self):
         # all unoccupied tiles are legal actions
         actions = [index for index, value in enumerate(self.state[:-1]) if value == 0]
         # pie rule is a legal action if only one player_1 tile is on the board
-        tile_freq_dict = Counter([tile for tile in self.state[:-1]])
-        if tile_freq_dict[1] == 1:
+        if self.local_env.is_pie_rule_usable and self.local_env.agent_selection == "player_2":
             actions.append(len(self.state)-1)
-        print('bruh')
+        # print('bruh')
         return actions
+
+    def __str__(self):
+        return str(self.value) + str(self.visits)
+
 
 
 class MCTS:
 
-    def __init__(self, root, term, env, num_iter=1000):
+    def __init__(self, root: Node, term, env, num_iter=1000):
         self.root = root
         # we don't want to run MCTS on a terminal state
         self.termination = term
@@ -55,17 +58,19 @@ class MCTS:
         self.iterations = num_iter
 
 
+
     def determine_action(self):
         for _ in range(self.iterations):
-
+            # SELECT
             selected_node = self.select_node()
-
-            self.expand_node(selected_node)
-
-            print('yay')
-
-            for child_node in selected_node.children:
-                self.simulate_and_backpropagate_playout(child_node)
+            # EXPAND
+            if not selected_node.is_terminal():
+                self.expand_node(selected_node)
+                selected_node = random.choice(selected_node.children)
+            # SIMULATE
+            playout_return = self.simulation(selected_node)
+            # BACKPROPAGATE
+            self.backpropagate(selected_node, playout_return)
 
         return self.root.best_child(0)  # Best child without exploration
 
@@ -80,6 +85,9 @@ class MCTS:
         return node
 
     def expand_node(self, node):
+        '''
+        Expand the selected node by creating leaf nodes for all legal_actions available from that state.
+        '''
         if not node.is_terminal():
             legal_actions = node.get_legal_actions()
             for action in legal_actions:
@@ -92,26 +100,29 @@ class MCTS:
                 child_node = node.add_child(child_state, env_copy, env.terminations)
 
 
-    # def simulate_and_backpropagate_playout(self, child_node):
-    #     # # Simulation
-    #     # # todo: save a env object in the tree
-    #
-    #     current_state = node.state
-    #     while not current_state.is_terminal():
-    #         # rollout policy
-    #         action = random.choice(current_state.get_legal_actions())
-    #         # todo, actually step
-    #         env.step(action)
-    #         current_state = flattened_state(env.observe('player_1'))
-    #
-    #     # todo: accumulate reward list and pop from stack
-    #     # Backpropagation
-    #     return = env.rewards['player_1']
-    #     while node:
-    #         node.visits += 1
-    #         node.value += reward
-    #         # reward = -reward  # Switch perspective for opponent todo: maybe get rid of this?
-    #         node = node.parent
+
+    def simulation(self, node):
+        env_copy = node.local_env.__copy__()
+
+        while True not in env.terminations.values():
+            board_state = game_utils.flatten_observation(env.observe(env.agent_selection))
+            legal_actions = [index for index, value in enumerate(board_state[:-1]) if value == 0]
+            random_action = random.choice(legal_actions)
+
+            env.step(random_action)
+
+        player = self.root.local_env.agent_selection
+        return 1 if env_copy.terminations[player] else 0
+
+
+    def backpropagate(self, node, ret_val):
+        while node:
+            node.visits += 1
+            node.value += ret_val
+            reward = -ret_val  # Switch perspective for opponent
+            node = node.parent
+
+
 
 
 
@@ -123,7 +134,7 @@ observation, reward, termination, truncation, info = env.last()
 
 #initialize tree
 flattened_initial_state = game_utils.flatten_observation(observation)
-root = Node(flattened_initial_state, env, termination)
+root = Node(flattened_initial_state, env, env.terminations)
 
 mcts = MCTS(root, termination, env)
 
