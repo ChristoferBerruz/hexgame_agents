@@ -18,6 +18,8 @@ import ray.cloudpickle as pickle
 from pathlib import Path
 import numpy as np
 
+import torch
+
 from typing import Tuple
 
 
@@ -216,9 +218,12 @@ class SelfPlayTrainable(ray.tune.Trainable):
                 "oponent_optimizer_state_dict": self.oponent_agent.optimizer.state_dict()
             }
         data_path = Path(checkpoint_dir) / "data.pkl"
+        model_path = Path(checkpoint_dir) / "model.pth"
         with open(data_path, "wb") as fp:
             all_data = {**checkpoint_data, **opponnent_nn_data}
             pickle.dump(all_data, fp)
+
+        torch.save(self.target_agent.nn.state_dict(), model_path)
 
         return Checkpoint.from_directory(checkpoint_dir)
 
